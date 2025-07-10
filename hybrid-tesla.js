@@ -257,19 +257,20 @@ class HybridTeslaTracker {
             
             logger.info(`Mevcut envanter: ${currentCount} araç`);
             
-            // İlk çalıştırma
+            // İlk çalıştırma - sadece araç varsa bildirim gönder
             if (this.lastInventoryCount === 0) {
                 this.lastInventoryCount = currentCount;
                 this.lastInventoryVins = currentVins;
                 
-                const message = `📊 Tesla TR Model Y envanterinde ${currentCount} araç bulundu\n\n` +
-                              `🌍 Kaynak: Sayfa scraping (TR)\n` +
-                              `🔄 Bot başlatıldı ve takip ediliyor.`;
-                
-                await this.sendTelegramMessage('🇹🇷 Tesla TR Bot Başlatıldı', message);
-                
-                // İlk 3 aracın detaylarını gönder
-                if (inventoryData.cars.length > 0) {
+                // Sadece araç varsa başlangıç mesajı gönder
+                if (currentCount > 0) {
+                    const message = `📊 Tesla TR Model Y envanterinde ${currentCount} araç bulundu\n\n` +
+                                  `🌍 Kaynak: Sayfa scraping (TR)\n` +
+                                  `🔄 Bot başlatıldı ve takip ediliyor.`;
+                    
+                    await this.sendTelegramMessage('🇹🇷 Tesla TR Bot - Araç Bulundu!', message);
+                    
+                    // İlk 3 aracın detaylarını gönder
                     const carsToShow = Math.min(inventoryData.cars.length, 3);
                     for (let i = 0; i < carsToShow; i++) {
                         const carDetails = this.formatCarDetails(inventoryData.cars[i]);
@@ -284,6 +285,9 @@ class HybridTeslaTracker {
                             `Ve ${inventoryData.cars.length - 3} araç daha mevcut...`
                         );
                     }
+                } else {
+                    // Araç yoksa sadece log, Telegram mesajı yok
+                    logger.info('🇹🇷 Tesla TR Bot başlatıldı. Şu anda araç yok, sessiz takip modunda.');
                 }
                 
                 return;
@@ -320,10 +324,18 @@ class HybridTeslaTracker {
                 const removedCount = this.lastInventoryCount - currentCount;
                 logger.info(`${removedCount} araç envanterden çıkarıldı`);
                 
-                const message = `📉 ${removedCount} araç envanterden çıkarıldı\n` +
-                              `📊 Kalan: ${currentCount} araç`;
-                
-                await this.sendTelegramMessage('Envanter Güncellemesi', message);
+                // Sadece araç kaldıysa bildirim gönder (tüm araçlar gittiyse sessiz)
+                if (currentCount > 0) {
+                    const message = `📉 ${removedCount} araç envanterden çıkarıldı\n` +
+                                  `📊 Kalan: ${currentCount} araç`;
+                    
+                    await this.sendTelegramMessage('Envanter Güncellemesi', message);
+                } else {
+                    logger.info('Tüm araçlar envanterden çıkarıldı. Sessiz takip devam ediyor.');
+                }
+            } else {
+                // Araç sayısı değişmedi - sadece log
+                logger.info(`Envanter değişmedi: ${currentCount} araç`);
             }
             
             // Son durumu güncelle
@@ -380,10 +392,8 @@ class HybridTeslaTracker {
             await this.browser.close();
         }
         
-        await this.sendTelegramMessage(
-            'Tesla Bot Durduruldu',
-            '🛑 Hybrid Tesla Tracker durduruldu.'
-        );
+        // Bot durdurulurken sadece log, Telegram spam'i önlemek için mesaj yok
+        logger.info('🛑 Hybrid Tesla Tracker temiz şekilde durduruldu.');
         
         logger.info('Hybrid Tesla Tracker durduruldu.');
     }
