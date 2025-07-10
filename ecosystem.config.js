@@ -1,7 +1,7 @@
 module.exports = {
   apps: [{
     name: 'tesla-bot',
-    script: './index.js',
+    script: './hybrid-tesla.js',
     instances: 1,
     exec_mode: 'fork',
     autorestart: true,
