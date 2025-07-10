@@ -174,8 +174,20 @@ class TeslaInventoryBot {
             
             const axiosConfig = {
                 headers: {
-                    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
-                    'Accept': 'application/json'
+                    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    'Accept': 'application/json, text/plain, */*',
+                    'Accept-Language': 'en-US,en;q=0.9,tr;q=0.8',
+                    'Accept-Encoding': 'gzip, deflate, br',
+                    'Cache-Control': 'no-cache',
+                    'Pragma': 'no-cache',
+                    'Sec-Ch-Ua': '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+                    'Sec-Ch-Ua-Mobile': '?0',
+                    'Sec-Ch-Ua-Platform': '"macOS"',
+                    'Sec-Fetch-Dest': 'empty',
+                    'Sec-Fetch-Mode': 'cors',
+                    'Sec-Fetch-Site': 'same-origin',
+                    'Referer': 'https://www.tesla.com/',
+                    'Origin': 'https://www.tesla.com'
                 },
                 timeout: 60000,
                 maxRedirects: 5
@@ -331,14 +343,14 @@ class TeslaInventoryBot {
             // İlk kontrolü hemen yap
             await this.checkInventory();
             
-            // Her 60 saniyede bir kontrol et
+            // Her 5 dakikada bir kontrol et (Tesla API rate limit için)
             this.checkInterval = setInterval(() => {
                 this.checkInventory().catch(error => {
                     logger.error(`Kontrol sırasında hata: ${error.message}`);
                 });
-            }, 60000);
+            }, 300000);
             
-            logger.info('Bot başlatıldı. Her 60 saniye Tesla envanteri kontrol edilecek.');
+            logger.info('Bot başlatıldı. Her 5 dakika Tesla envanteri kontrol edilecek.');
             
         } catch (error) {
             logger.error(`Bot başlatılırken hata oluştu: ${error.message}`);
