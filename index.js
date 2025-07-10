@@ -26,8 +26,77 @@ class TeslaInventoryTracker {
         this.lastInventoryVins = new Set();
         this.checkInterval = null;
         
-        // Tesla inventory API setup
-        const fetcher = url => fetch(url).then(res => res.text());
+        // Tesla inventory API setup with TR-optimized fetcher
+        const fetcher = async (url) => {
+            logger.info(`API Request: ${url}`);
+            
+            // TR-specific optimizations
+            const isTrRequest = url.includes('market":"TR') || url.includes('tr');
+            
+            try {
+                const headers = {
+                    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36',
+                    'Accept': 'application/json, text/plain, */*',
+                    'Accept-Language': isTrRequest ? 'tr-TR,tr;q=0.9,en;q=0.8' : 'de-DE,de;q=0.9,en;q=0.8',
+                    'Accept-Encoding': 'gzip, deflate, br',
+                    'Cache-Control': 'no-cache',
+                    'Pragma': 'no-cache',
+                    'Sec-Fetch-Dest': 'empty',
+                    'Sec-Fetch-Mode': 'cors',
+                    'Sec-Fetch-Site': 'same-origin'
+                };
+                
+                // TR için özel referrer
+                if (isTrRequest) {
+                    headers['Referer'] = 'https://www.tesla.com/tr_TR/';
+                    headers['Origin'] = 'https://www.tesla.com';
+                } else {
+                    headers['Referer'] = 'https://www.tesla.com/';
+                    headers['Origin'] = 'https://www.tesla.com';
+                }
+                
+                const response = await fetch(url, {
+                    method: 'GET',
+                    headers: headers,
+                    timeout: isTrRequest ? 45000 : 30000 // TR için daha uzun timeout
+                });
+                
+                logger.info(`API Response Status: ${response.status} ${response.statusText}`);
+                
+                if (!response.ok) {
+                    const errorText = await response.text();
+                    logger.error(`API Error Response: ${errorText.substring(0, 200)}`);
+                    
+                    // TR-specific error handling
+                    if (isTrRequest && (response.status === 403 || response.status === 429)) {
+                        throw new Error(`TR market blocked (${response.status}) - will retry with backoff`);
+                    }
+                    
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+                
+                const text = await response.text();
+                logger.info(`API Response Length: ${text.length} characters`);
+                
+                // HTML response kontrolü
+                if (text.trim().startsWith('<') || text.includes('<HTML>')) {
+                    logger.error('HTML response received instead of JSON');
+                    
+                    if (isTrRequest) {
+                        throw new Error('TR market returned HTML - likely geo-blocked or rate limited');
+                    } else {
+                        throw new Error('Tesla API returned HTML instead of JSON - likely blocked or rate limited');
+                    }
+                }
+                
+                return text;
+                
+            } catch (error) {
+                logger.error(`Fetcher error: ${error.message}`);
+                throw error;
+            }
+        };
+        
         this.teslaInventory = createTeslaInventory(fetcher);
     }
 
@@ -81,25 +150,99 @@ class TeslaInventoryTracker {
         try {
             logger.info('Tesla TR Model Y envanteri kontrol ediliyor...');
             
-            // TR market, Model Y, yeni araçlar
-            const results = await this.teslaInventory('tr', {
-                model: 'y',
-                condition: 'new',
-                arrangeby: 'Price',
-                order: 'asc'
-            });
+            // TR market birinci öncelik - özel retry logic ile
+            let results;
+            let market = 'tr';
+            let trRetryCount = 0;
+            const maxTrRetries = 3;
+            
+            // TR için özel retry logic
+            while (trRetryCount < maxTrRetries) {
+                try {
+                    logger.info(`TR market deneniyor... (Deneme ${trRetryCount + 1}/${maxTrRetries})`);
+                    
+                    results = await this.teslaInventory('tr', {
+                        model: 'y',
+                        condition: 'new',
+                        arrangeby: 'Price',
+                        order: 'asc'
+                    });
+                    
+                    logger.info('🇹🇷 TR market başarılı!');
+                    break; // Başarılı olduysa loop'tan çık
+                    
+                } catch (trError) {
+                    trRetryCount++;
+                    logger.warn(`TR market deneme ${trRetryCount} başarısız: ${trError.message}`);
+                    
+                    if (trRetryCount < maxTrRetries) {
+                        // TR için özel bekleme süresi - her denemede artan süre
+                        const waitTime = trRetryCount * 5000; // 5s, 10s, 15s
+                        logger.info(`TR retry için ${waitTime}ms bekleniyor...`);
+                        await new Promise(resolve => setTimeout(resolve, waitTime));
+                    }
+                }
+            }
+            
+            // TR başarısız olduysa alternatif marketler
+            if (!results) {
+                logger.warn('🇹🇷 TR market 3 denemede başarısız. Alternatif marketler deneniyor...');
+                
+                try {
+                    // DE alternatif
+                    logger.info('🇩🇪 DE market deneniyor...');
+                    results = await this.teslaInventory('de', {
+                        model: 'y',
+                        condition: 'new',
+                        arrangeby: 'Price',
+                        order: 'asc'
+                    });
+                    market = 'de';
+                    logger.info('🇩🇪 DE market başarılı (TR yedeği)');
+                    
+                    // TR yedeği kullanıldığını bildir
+                    await this.sendTelegramMessage(
+                        '⚠️ TR Market Sorunu',
+                        '🇹🇷 TR market şu anda erişilemez durumda.\n' +
+                        '🇩🇪 Geçici olarak DE market kullanılıyor.\n' +
+                        '🔄 TR market tekrar denenmeye devam edilecek.'
+                    );
+                    
+                } catch (deError) {
+                    logger.warn(`DE market da başarısız: ${deError.message}`);
+                    
+                    // Son çare US
+                    logger.info('🇺🇸 US market deneniyor...');
+                    results = await this.teslaInventory('us', {
+                        model: 'y',
+                        condition: 'new',
+                        arrangeby: 'Price',
+                        order: 'asc'
+                    });
+                    market = 'us';
+                    logger.info('🇺🇸 US market başarılı (son çare)');
+                    
+                    await this.sendTelegramMessage(
+                        '🚨 Market Sorunu',
+                        '🇹🇷 TR ve 🇩🇪 DE marketler erişilemez.\n' +
+                        '🇺🇸 Geçici olarak US market kullanılıyor.\n' +
+                        '⚠️ Fiyatlar USD cinsinden olacak!'
+                    );
+                }
+            }
             
             const currentCount = results.length;
             const currentVins = new Set(results.map(car => car.VIN).filter(vin => vin));
             
-            logger.info(`Mevcut envanter: ${currentCount} araç`);
+            logger.info(`Mevcut envanter (${market.toUpperCase()}): ${currentCount} araç`);
             
             // İlk çalıştırma
             if (this.lastInventoryCount === 0) {
                 this.lastInventoryCount = currentCount;
                 this.lastInventoryVins = currentVins;
                 
-                const message = `📊 Tesla TR Model Y envanterinde ${currentCount} araç bulundu\n\n` +
+                const message = `📊 Tesla ${market.toUpperCase()} Model Y envanterinde ${currentCount} araç bulundu\n\n` +
+                              `🌍 Market: ${market.toUpperCase()}\n` +
                               `🔄 Bot başlatıldı ve takip ediliyor.`;
                 
                 await this.sendTelegramMessage('Tesla Envanter Bot Başlatıldı', message);
