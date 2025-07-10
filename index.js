@@ -64,10 +64,16 @@ class TeslaInventoryBot {
             const data = await fs.readFile('proxy-list.txt', 'utf8');
             this.proxyList = data.split('\n')
                 .map(line => line.trim())
-                .filter(line => line && line.includes(':'));
+                .filter(line => line && line.includes(':'))
+                .filter(line => {
+                    // Basic proxy format validation
+                    const parts = line.split(':');
+                    return parts.length >= 2 && parts[0] && parts[1];
+                });
             logger.info(`${this.proxyList.length} proxy yüklendi`);
         } catch (error) {
-            logger.error(`Proxy listesi yüklenemedi: ${error.message}`);
+            logger.warn(`Proxy listesi yüklenemedi: ${error.message}`);
+            logger.info('Proxy olmadan devam ediliyor...');
         }
     }
 
@@ -159,7 +165,7 @@ class TeslaInventoryBot {
         return message;
     }
 
-    async checkInventory() {
+    async checkInventory(retryCount = 0) {
         try {
             logger.info('Tesla envanter kontrol ediliyor...');
             
@@ -176,12 +182,22 @@ class TeslaInventoryBot {
             };
             
             if (proxyUrl) {
-                axiosConfig.httpsAgent = new HttpsProxyAgent(proxyUrl);
-                axiosConfig.proxy = false; // axios'un kendi proxy ayarını devre dışı bırak
+                try {
+                    axiosConfig.httpsAgent = new HttpsProxyAgent(proxyUrl);
+                    axiosConfig.proxy = false; // axios'un kendi proxy ayarını devre dışı bırak
+                    logger.debug(`Proxy kullanılıyor: ${proxyUrl}`);
+                } catch (proxyError) {
+                    logger.warn(`Proxy hatası: ${proxyError.message}. Proxy olmadan devam ediliyor...`);
+                }
             }
             
             const response = await axios.get(apiUrl, axiosConfig);
             const data = response.data;
+            
+            // Response validation
+            if (!data || typeof data.total_matches_found !== 'number') {
+                throw new Error('Invalid API response format');
+            }
             
             const totalMatches = data.total_matches_found || 0;
             let results = data.results || [];
@@ -254,6 +270,11 @@ class TeslaInventoryBot {
             this.lastTotalMatches = totalMatches;
             
         } catch (error) {
+            if (retryCount < 3) {
+                logger.warn(`API hatası, ${retryCount + 1}. deneme: ${error.message}`);
+                await new Promise(resolve => setTimeout(resolve, 5000));
+                return this.checkInventory(retryCount + 1);
+            }
             this.handleError(`API isteği hatası: ${error.message}`);
         }
     }
@@ -289,6 +310,14 @@ class TeslaInventoryBot {
     async start() {
         logger.info('Tesla Envanter Bot başlatılıyor...');
         
+        // Environment variables validation
+        if (!process.env.TELEGRAM_BOT_TOKEN) {
+            throw new Error('TELEGRAM_BOT_TOKEN environment variable is required');
+        }
+        if (!process.env.TELEGRAM_CHAT_ID) {
+            throw new Error('TELEGRAM_CHAT_ID environment variable is required');
+        }
+        
         try {
             // Proxy listesini yükle
             await this.loadProxyList();
@@ -302,14 +331,14 @@ class TeslaInventoryBot {
             // İlk kontrolü hemen yap
             await this.checkInventory();
             
-            // Her 10 saniyede bir kontrol et
+            // Her 60 saniyede bir kontrol et
             this.checkInterval = setInterval(() => {
                 this.checkInventory().catch(error => {
                     logger.error(`Kontrol sırasında hata: ${error.message}`);
                 });
-            }, 10000);
+            }, 60000);
             
-            logger.info('Bot başlatıldı. Her 10 saniye Tesla envanteri kontrol edilecek.');
+            logger.info('Bot başlatıldı. Her 60 saniye Tesla envanteri kontrol edilecek.');
             
         } catch (error) {
             logger.error(`Bot başlatılırken hata oluştu: ${error.message}`);
