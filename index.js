@@ -1,8 +1,6 @@
-const axios = require('axios');
-const fs = require('fs').promises;
-const { HttpsProxyAgent } = require('https-proxy-agent');
-const winston = require('winston');
+const createTeslaInventory = require('tesla-inventory');
 const TelegramBot = require('node-telegram-bot-api');
+const winston = require('winston');
 require('dotenv').config();
 
 // Logger yapılandırması
@@ -16,405 +14,237 @@ const logger = winston.createLogger({
     ),
     transports: [
         new winston.transports.Console(),
-        new winston.transports.File({ filename: 'tesla-bot.log' })
+        new winston.transports.File({ filename: 'tesla-inventory-bot.log' })
     ]
 });
 
-class TelegramNotifier {
+class TeslaInventoryTracker {
     constructor() {
         this.bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN);
         this.chatId = process.env.TELEGRAM_CHAT_ID;
+        this.lastInventoryCount = 0;
+        this.lastInventoryVins = new Set();
+        this.checkInterval = null;
+        
+        // Tesla inventory API setup
+        const fetcher = url => fetch(url).then(res => res.text());
+        this.teslaInventory = createTeslaInventory(fetcher);
     }
 
-    async sendNotification(title, message) {
+    async sendTelegramMessage(title, message) {
         try {
             await this.bot.sendMessage(this.chatId, `*${title}*\n\n${message}`, {
                 parse_mode: 'Markdown',
                 disable_web_page_preview: false
             });
-            logger.info(`Telegram bildirimi gönderildi: ${title}`);
+            logger.info(`Telegram mesajı gönderildi: ${title}`);
         } catch (error) {
-            logger.error(`Telegram bildirimi gönderilemedi: ${error.message}`);
+            logger.error(`Telegram mesajı gönderilemedi: ${error.message}`);
         }
     }
 
-    async sendInventoryUpdate(title, message) {
-        await this.sendNotification(title, message);
-    }
-
-    async sendErrorNotification(title, message) {
-        await this.sendNotification(title, message);
-    }
-}
-
-class TeslaInventoryBot {
-    constructor() {
-        this.telegramNotifier = new TelegramNotifier();
-        this.lastTotalMatches = 0;
-        this.isErrorState = false;
-        this.lastErrorTime = null;
-        this.ERROR_NOTIFICATION_INTERVAL_MINUTES = 30;
-        this.proxyList = [];
-        this.checkInterval = null;
-        this.TESLA_API_BASE_URL = 'https://www.tesla.com/coinorder/api/v4/inventory-results';
-    }
-
-    async loadProxyList() {
-        try {
-            const data = await fs.readFile('proxy-list.txt', 'utf8');
-            this.proxyList = data.split('\n')
-                .map(line => line.trim())
-                .filter(line => line && line.includes(':'))
-                .filter(line => {
-                    // Basic proxy format validation
-                    const parts = line.split(':');
-                    return parts.length >= 2 && parts[0] && parts[1];
-                });
-            logger.info(`${this.proxyList.length} proxy yüklendi`);
-        } catch (error) {
-            logger.warn(`Proxy listesi yüklenemedi: ${error.message}`);
-            logger.info('Proxy olmadan devam ediliyor...');
-        }
-    }
-
-    getRandomProxy() {
-        if (this.proxyList.length === 0) return null;
-        const proxy = this.proxyList[Math.floor(Math.random() * this.proxyList.length)];
-        return `http://${proxy}`;
-    }
-
-    buildTeslaApiUrl() {
-        const market = process.env.TESLA_MARKET || 'DE';
-        const language = process.env.TESLA_LANGUAGE || 'de';
+    formatCarDetails(car) {
+        let message = `🚗 *${car.Year} Tesla Model ${car.Model?.toUpperCase()}*\n`;
         
-        let superRegion = 'europe';
-        if (market === 'US' || market === 'CA') {
-            superRegion = 'north america';
-        }
-
-        const query = {
-            query: {
-                model: 'my',
-                condition: 'new',
-                options: {},
-                arrangeby: 'Price',
-                order: 'asc',
-                market: market,
-                language: language,
-                super_region: superRegion,
-                lng: '',
-                lat: '',
-                zip: '',
-                range: 0
-            },
-            offset: 0,
-            count: 24,
-            outsideOffset: 0,
-            outsideSearch: false,
-            isFalconDeliverySelectionEnabled: true,
-            version: 'v2'
-        };
-
-        return `${this.TESLA_API_BASE_URL}?query=${encodeURIComponent(JSON.stringify(query))}`;
-    }
-
-    buildTeslaCarLink(vin) {
-        const market = process.env.TESLA_MARKET || 'DE';
-        const language = process.env.TESLA_LANGUAGE || 'de';
-        const locale = `${language.toLowerCase()}_${market.toUpperCase()}`;
-        
-        return `https://www.tesla.com/${locale}/my/order/${vin}?titleStatus=new&redirect=no#overview`;
-    }
-
-    buildCarDetailsMessage(car, carIndex, totalCars) {
-        const vin = car.VIN || '';
-        const model = car.Model || '';
-        const trimName = car.TrimName || '';
-        const year = car.Year || '';
-        const price = car.Price || '';
-        const currency = car.CurrencyCode || '';
-        
-        let message = `${year} ${model} ${trimName}\n`;
-        
-        if (price) {
-            message += `Fiyat: ${price} ${currency}\n`;
+        if (car.TrimName) {
+            message += `Trim: ${car.TrimName}\n`;
         }
         
-        if (vin) {
-            message += `VIN: ${vin}\n`;
+        if (car.Price && car.CurrencyCode) {
+            message += `💰 Fiyat: ${car.Price} ${car.CurrencyCode}\n`;
         }
         
-        // Renk
+        if (car.VIN) {
+            message += `🔢 VIN: ${car.VIN}\n`;
+        }
+        
+        // Renk bilgisi
         if (car.PAINT && car.PAINT.length > 0) {
-            message += `Renk: ${car.PAINT[0]}\n`;
+            message += `🎨 Renk: ${car.PAINT[0]}\n`;
         }
         
         // İç mekan
         if (car.INTERIOR && car.INTERIOR.length > 0) {
-            message += `İç Mekan: ${car.INTERIOR[0]}\n`;
+            message += `🪑 İç Mekan: ${car.INTERIOR[0]}\n`;
         }
         
-        // Tesla link
-        if (vin) {
-            const carLink = this.buildTeslaCarLink(vin);
-            message += `\nTesla'da Görüntüle: ${carLink}`;
+        // Tesla link oluştur
+        if (car.VIN) {
+            const carLink = `https://www.tesla.com/tr_tr/my/order/${car.VIN}?titleStatus=new&redirect=no#overview`;
+            message += `\n🔗 [Tesla'da Görüntüle](${carLink})`;
         }
-        
-        logger.info(`Araç detayları oluşturuldu: VIN=${vin}, Model=${model}, Fiyat=${price}`);
         
         return message;
     }
 
-    async checkInventory(retryCount = 0) {
+    async checkInventory() {
         try {
-            logger.info('Tesla envanter kontrol ediliyor...');
+            logger.info('Tesla TR Model Y envanteri kontrol ediliyor...');
             
-            const apiUrl = this.buildTeslaApiUrl();
-            const proxyUrl = this.getRandomProxy();
+            // TR market, Model Y, yeni araçlar
+            const results = await this.teslaInventory('tr', {
+                model: 'y',
+                condition: 'new',
+                arrangeby: 'Price',
+                order: 'asc'
+            });
             
-            const axiosConfig = {
-                headers: {
-                    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                    'Accept': 'application/json, text/plain, */*',
-                    'Accept-Language': 'en-US,en;q=0.9,tr;q=0.8',
-                    'Accept-Encoding': 'gzip, deflate, br',
-                    'Cache-Control': 'no-cache',
-                    'Pragma': 'no-cache',
-                    'Sec-Ch-Ua': '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
-                    'Sec-Ch-Ua-Mobile': '?0',
-                    'Sec-Ch-Ua-Platform': '"macOS"',
-                    'Sec-Fetch-Dest': 'empty',
-                    'Sec-Fetch-Mode': 'cors',
-                    'Sec-Fetch-Site': 'same-origin',
-                    'Referer': 'https://www.tesla.com/',
-                    'Origin': 'https://www.tesla.com'
-                },
-                timeout: 60000,
-                maxRedirects: 5
-            };
+            const currentCount = results.length;
+            const currentVins = new Set(results.map(car => car.VIN).filter(vin => vin));
             
-            if (proxyUrl) {
-                try {
-                    axiosConfig.httpsAgent = new HttpsProxyAgent(proxyUrl);
-                    axiosConfig.proxy = false; // axios'un kendi proxy ayarını devre dışı bırak
-                    logger.debug(`Proxy kullanılıyor: ${proxyUrl}`);
-                } catch (proxyError) {
-                    logger.warn(`Proxy hatası: ${proxyError.message}. Proxy olmadan devam ediliyor...`);
-                }
-            }
+            logger.info(`Mevcut envanter: ${currentCount} araç`);
             
-            const response = await axios.get(apiUrl, axiosConfig);
-            const data = response.data;
-            
-            // Response validation
-            if (!data || typeof data.total_matches_found !== 'number') {
-                throw new Error('Invalid API response format');
-            }
-            
-            const totalMatches = data.total_matches_found || 0;
-            let results = data.results || [];
-            
-            // results bir array değilse exact/approximate kontrol et
-            if (!Array.isArray(results)) {
-                const exactResults = results.exact || [];
-                const approximateResults = results.approximate || [];
-                results = [...exactResults, ...approximateResults];
-            }
-            
-            logger.info(`Toplam eşleşme: ${totalMatches}, Results: ${results.length}`);
-            
-            // Hata durumunu temizle
-            if (this.isErrorState) {
-                this.isErrorState = false;
-                this.lastErrorTime = null;
-                logger.info('API hatası düzeldi. Normal kontroller devam ediyor.');
-            }
-            
-            // Yeni araç geldi mi kontrol et
-            if (totalMatches !== this.lastTotalMatches && this.lastTotalMatches > 0) {
-                const newCars = totalMatches - this.lastTotalMatches;
-                const message = `🎉 Tesla envanterinde ${newCars} yeni araç bulundu!\nToplam: ${totalMatches} araç\n\n`;
+            // İlk çalıştırma
+            if (this.lastInventoryCount === 0) {
+                this.lastInventoryCount = currentCount;
+                this.lastInventoryVins = currentVins;
                 
-                // Yeni araçların detaylarını gönder
+                const message = `📊 Tesla TR Model Y envanterinde ${currentCount} araç bulundu\n\n` +
+                              `🔄 Bot başlatıldı ve takip ediliyor.`;
+                
+                await this.sendTelegramMessage('Tesla Envanter Bot Başlatıldı', message);
+                
+                // İlk 3 aracın detaylarını gönder
                 if (results.length > 0) {
-                    logger.info(`${results.length} yeni araç bulundu, detaylı mesajlar gönderiliyor...`);
-                    
-                    for (let i = 0; i < Math.min(results.length, newCars); i++) {
-                        const car = results[i];
-                        const carDetails = this.buildCarDetailsMessage(car, i + 1, results.length);
-                        await this.telegramNotifier.sendInventoryUpdate('🚗 Yeni Tesla Araç', carDetails);
+                    const carsToShow = Math.min(results.length, 3);
+                    for (let i = 0; i < carsToShow; i++) {
+                        const carDetails = this.formatCarDetails(results[i]);
+                        await this.sendTelegramMessage(`Mevcut Araç ${i + 1}/${results.length}`, carDetails);
                         
-                        // Telegram rate limit için küçük bir gecikme
-                        await new Promise(resolve => setTimeout(resolve, 500));
+                        // Rate limit için bekle
+                        await new Promise(resolve => setTimeout(resolve, 1000));
+                    }
+                    
+                    if (results.length > 3) {
+                        await this.sendTelegramMessage(
+                            'Daha Fazla Araç',
+                            `Ve ${results.length - 3} araç daha mevcut...`
+                        );
                     }
                 }
                 
-                await this.telegramNotifier.sendInventoryUpdate('Tesla Envanter Güncellemesi', message);
-                logger.info('Yeni araç bildirimi gönderildi');
+                return;
             }
             
-            // İlk çalıştırma
-            if (this.lastTotalMatches === 0 && totalMatches > 0) {
-                const message = `📊 Tesla envanterinde ${totalMatches} araç bulundu\n\n`;
-                await this.telegramNotifier.sendInventoryUpdate('Tesla Envanter Durumu', message);
+            // Yeni araç kontrolü
+            if (currentCount > this.lastInventoryCount) {
+                const newCarCount = currentCount - this.lastInventoryCount;
+                logger.info(`${newCarCount} yeni araç tespit edildi!`);
                 
-                // İlk 5 aracın detaylarını gönder
-                const carsToShow = Math.min(results.length, 5);
-                for (let i = 0; i < carsToShow; i++) {
-                    const car = results[i];
-                    const carDetails = this.buildCarDetailsMessage(car, i + 1, results.length);
-                    await this.telegramNotifier.sendInventoryUpdate('Araç', carDetails);
+                // Yeni araçları bul
+                const newCars = results.filter(car => 
+                    car.VIN && !this.lastInventoryVins.has(car.VIN)
+                );
+                
+                // Genel bildirim gönder
+                const alertMessage = `🎉 *Tesla Model Y Envanterinde Yeni Araç!*\n\n` +
+                                   `📈 ${newCarCount} yeni araç eklendi\n` +
+                                   `📊 Toplam: ${currentCount} araç\n` +
+                                   `⏰ ${new Date().toLocaleString('tr-TR')}`;
+                
+                await this.sendTelegramMessage('🚨 YENİ ARAÇ ALARMI', alertMessage);
+                
+                // Her yeni aracın detaylarını gönder
+                for (let i = 0; i < newCars.length; i++) {
+                    const car = newCars[i];
+                    const carDetails = this.formatCarDetails(car);
+                    await this.sendTelegramMessage(`🆕 Yeni Araç ${i + 1}/${newCars.length}`, carDetails);
                     
-                    // Telegram rate limit için küçük bir gecikme
-                    await new Promise(resolve => setTimeout(resolve, 500));
+                    // Rate limit
+                    await new Promise(resolve => setTimeout(resolve, 1500));
                 }
                 
-                if (results.length > 5) {
-                    await this.telegramNotifier.sendNotification(
-                        'Daha Fazla Araç',
-                        `Toplamda ${results.length} araç mevcut. İlk 5 tanesi gösterildi.`
-                    );
-                }
+            } else if (currentCount < this.lastInventoryCount) {
+                const removedCount = this.lastInventoryCount - currentCount;
+                logger.info(`${removedCount} araç envanterden çıkarıldı`);
                 
-                logger.info(`İlk başlatmada araç detayları gönderildi. Toplam: ${results.length}`);
+                const message = `📉 ${removedCount} araç envanterden çıkarıldı\n` +
+                              `📊 Kalan: ${currentCount} araç`;
+                
+                await this.sendTelegramMessage('Envanter Güncellemesi', message);
             }
             
-            this.lastTotalMatches = totalMatches;
+            // Son durumu güncelle
+            this.lastInventoryCount = currentCount;
+            this.lastInventoryVins = currentVins;
             
         } catch (error) {
-            if (retryCount < 3) {
-                logger.warn(`API hatası, ${retryCount + 1}. deneme: ${error.message}`);
-                await new Promise(resolve => setTimeout(resolve, 5000));
-                return this.checkInventory(retryCount + 1);
-            }
-            this.handleError(`API isteği hatası: ${error.message}`);
-        }
-    }
-
-    async handleError(errorMessage) {
-        logger.error(`Hata: ${errorMessage}`);
-        
-        if (!this.isErrorState) {
-            // İlk hata
-            this.isErrorState = true;
-            this.lastErrorTime = new Date();
-            await this.telegramNotifier.sendErrorNotification(
-                'Tesla Bot Hatası',
-                `❌ Tesla API'sine erişim hatası: ${errorMessage}`
-            );
-            logger.info('İlk hata bildirimi gönderildi');
-        } else {
-            // Sürekli hata durumu - 30 dakika kontrol et
-            const now = new Date();
-            const timeDiff = (now - this.lastErrorTime) / 1000 / 60; // dakika
+            logger.error(`Envanter kontrolü hatası: ${error.message}`);
             
-            if (timeDiff >= this.ERROR_NOTIFICATION_INTERVAL_MINUTES) {
-                await this.telegramNotifier.sendErrorNotification(
-                    'Tesla Bot Sürekli Hata',
-                    `⚠️ Tesla API hatası ${this.ERROR_NOTIFICATION_INTERVAL_MINUTES} dakikadır devam ediyor: ${errorMessage}`
-                );
-                this.lastErrorTime = now;
-                logger.info('Sürekli hata bildirimi gönderildi');
-            }
+            const errorMessage = `❌ Tesla API hatası: ${error.message}\n\n` +
+                                `🔄 Bir sonraki kontrolde tekrar denenecek.`;
+            
+            await this.sendTelegramMessage('Tesla Bot Hatası', errorMessage);
         }
     }
 
     async start() {
-        logger.info('Tesla Envanter Bot başlatılıyor...');
+        logger.info('Tesla Inventory Tracker başlatılıyor...');
         
-        // Environment variables validation
+        // Environment variables kontrolü
         if (!process.env.TELEGRAM_BOT_TOKEN) {
-            throw new Error('TELEGRAM_BOT_TOKEN environment variable is required');
+            throw new Error('TELEGRAM_BOT_TOKEN environment variable gerekli');
         }
         if (!process.env.TELEGRAM_CHAT_ID) {
-            throw new Error('TELEGRAM_CHAT_ID environment variable is required');
+            throw new Error('TELEGRAM_CHAT_ID environment variable gerekli');
         }
         
         try {
-            // Proxy listesini yükle
-            await this.loadProxyList();
-            
-            // Bot başlatma bildirimi gönder
-            await this.telegramNotifier.sendNotification(
-                'Tesla Bot Başlatıldı',
-                '🚀 Tesla Envanter Bot başarıyla başlatıldı ve çalışıyor.'
-            );
-            
             // İlk kontrolü hemen yap
             await this.checkInventory();
             
-            // Her 5 dakikada bir kontrol et (Tesla API rate limit için)
+            // Her 2 dakikada bir kontrol et (tesla-inventory daha az agresif)
             this.checkInterval = setInterval(() => {
                 this.checkInventory().catch(error => {
-                    logger.error(`Kontrol sırasında hata: ${error.message}`);
+                    logger.error(`Periyodik kontrol hatası: ${error.message}`);
                 });
-            }, 300000);
+            }, 120000); // 2 dakika
             
-            logger.info('Bot başlatıldı. Her 5 dakika Tesla envanteri kontrol edilecek.');
+            logger.info('Tesla Inventory Tracker başlatıldı. Her 2 dakika kontrol edilecek.');
             
         } catch (error) {
-            logger.error(`Bot başlatılırken hata oluştu: ${error.message}`);
-            await this.telegramNotifier.sendErrorNotification(
-                'Tesla Bot Başlatma Hatası',
-                `❌ Bot başlatılırken hata oluştu: ${error.message}`
-            );
+            logger.error(`Bot başlatılamadı: ${error.message}`);
             throw error;
         }
     }
 
     async stop() {
-        logger.info('Bot durduruluyor...');
+        logger.info('Tesla Inventory Tracker durduruluyor...');
         
-        try {
-            // Interval'i temizle
-            if (this.checkInterval) {
-                clearInterval(this.checkInterval);
-            }
-            
-            // Bot kapatma bildirimi gönder
-            await this.telegramNotifier.sendNotification(
-                'Tesla Bot Durduruldu',
-                '🛑 Tesla Envanter Bot durduruldu.'
-            );
-            
-            logger.info('Bot durduruldu.');
-            
-        } catch (error) {
-            logger.error(`Bot durdurulurken hata oluştu: ${error.message}`);
-            
-            try {
-                await this.telegramNotifier.sendErrorNotification(
-                    'Tesla Bot Durdurma Hatası',
-                    `⚠️ Bot durdurulurken hata oluştu: ${error.message}`
-                );
-            } catch (notificationError) {
-                logger.error(`Durdurma hatası bildirimi gönderilemedi: ${notificationError.message}`);
-            }
+        if (this.checkInterval) {
+            clearInterval(this.checkInterval);
         }
+        
+        await this.sendTelegramMessage(
+            'Tesla Bot Durduruldu',
+            '🛑 Tesla Inventory Tracker durduruldu.'
+        );
+        
+        logger.info('Tesla Inventory Tracker durduruldu.');
     }
 }
 
 // Ana fonksiyon
 async function main() {
-    const bot = new TeslaInventoryBot();
+    const tracker = new TeslaInventoryTracker();
     
     // Graceful shutdown
     process.on('SIGINT', async () => {
         logger.info('SIGINT sinyali alındı...');
-        await bot.stop();
+        await tracker.stop();
         process.exit(0);
     });
     
     process.on('SIGTERM', async () => {
         logger.info('SIGTERM sinyali alındı...');
-        await bot.stop();
+        await tracker.stop();
         process.exit(0);
     });
     
     try {
-        await bot.start();
+        await tracker.start();
     } catch (error) {
-        logger.error(`Bot başlatılamadı: ${error.message}`);
+        logger.error(`Tracker başlatılamadı: ${error.message}`);
         process.exit(1);
     }
 }
