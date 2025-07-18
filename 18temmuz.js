@@ -146,7 +146,7 @@ async function fetchInventory(model, attempt = 1) {
       console.log(`Response status: ${response.status}`);
       
       if (response.status === 200) {
-        console.log(`✅ Model ${model} için başarılı! Status: ${response.status}`);
+        console.log(`✅ Model ${model} için başarılı! Status: ${response.status}`,response.data);
         return response.data.results || [];
       } else {
         console.log(`❌ Model ${model} için başarısız. Status: ${response.status}`);
@@ -196,5 +196,5 @@ async function checkInventory() {
 checkInventory().then(() => {
   // Her 15 dakikada bir kontrol et
   cron.schedule('*/5 * * * *', checkInventory);
-  console.log('Bot başlatıldı, envanter kontrolü her 15 dakikada bir yapılacak.');
+  console.log('Bot başlatıldı, envanter kontrolü her 5 dakikada bir yapılacak.');
 });
